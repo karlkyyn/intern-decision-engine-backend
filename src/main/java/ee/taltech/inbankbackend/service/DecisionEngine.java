@@ -1,10 +1,12 @@
 package ee.taltech.inbankbackend.service;
 
 import com.github.vladislavgoltjajev.personalcode.locale.estonia.EstonianPersonalCodeValidator;
+import com.github.vladislavgoltjajev.personalcode.locale.estonia.EstonianPersonalCodeParser;
 import ee.taltech.inbankbackend.config.DecisionEngineConstants;
 import ee.taltech.inbankbackend.exceptions.InvalidLoanAmountException;
 import ee.taltech.inbankbackend.exceptions.InvalidLoanPeriodException;
 import ee.taltech.inbankbackend.exceptions.InvalidPersonalCodeException;
+import ee.taltech.inbankbackend.exceptions.InvalidCustomerAgeException;
 import ee.taltech.inbankbackend.exceptions.NoValidLoanException;
 import org.springframework.stereotype.Service;
 
@@ -18,6 +20,7 @@ public class DecisionEngine {
 
     // Used to check for the validity of the presented ID code.
     private final EstonianPersonalCodeValidator validator = new EstonianPersonalCodeValidator();
+    private final EstonianPersonalCodeParser parser = new EstonianPersonalCodeParser();
     private int creditModifier = 0;
 
     /**
@@ -31,12 +34,13 @@ public class DecisionEngine {
      * @param loanPeriod Requested loan period
      * @return A Decision object containing the approved loan amount and period, and an error message (if any)
      * @throws InvalidPersonalCodeException If the provided personal ID code is invalid
+     * @throws InvalidCustomerAgeException If the customer is too young
      * @throws InvalidLoanAmountException If the requested loan amount is invalid
      * @throws InvalidLoanPeriodException If the requested loan period is invalid
      * @throws NoValidLoanException If there is no valid loan found for the given ID code, loan amount and loan period
      */
     public Decision calculateApprovedLoan(String personalCode, Long loanAmount, int loanPeriod)
-            throws InvalidPersonalCodeException, InvalidLoanAmountException, InvalidLoanPeriodException,
+            throws InvalidPersonalCodeException, InvalidCustomerAgeException, InvalidLoanAmountException, InvalidLoanPeriodException,
             NoValidLoanException {
         try {
             verifyInputs(personalCode, loanAmount, loanPeriod);
@@ -55,8 +59,24 @@ public class DecisionEngine {
             loanPeriod++;
         }
 
+        float creditScore = calculateCreditScore(loanPeriod, loanAmount);
+
+        if (creditScore < 1) {
+            while (highestValidLoanAmount(loanPeriod) < loanAmount) {
+                if (loanPeriod < DecisionEngineConstants.MAXIMUM_LOAN_PERIOD) {
+                    loanPeriod++;
+                } else {
+                    break;
+                }
+            }
+        } else if (creditScore > 1) {
+            while (highestValidLoanAmount(loanPeriod) > loanAmount) {
+                loanAmount += 100;
+            }
+        }
+
         if (loanPeriod <= DecisionEngineConstants.MAXIMUM_LOAN_PERIOD) {
-            outputLoanAmount = Math.min(DecisionEngineConstants.MAXIMUM_LOAN_AMOUNT, highestValidLoanAmount(loanPeriod));
+                outputLoanAmount = Math.min(Math.min(DecisionEngineConstants.MAXIMUM_LOAN_AMOUNT, loanAmount.intValue()), highestValidLoanAmount(loanPeriod));
         } else {
             throw new NoValidLoanException("No valid loan found!");
         }
@@ -71,6 +91,17 @@ public class DecisionEngine {
      */
     private int highestValidLoanAmount(int loanPeriod) {
         return creditModifier * loanPeriod;
+    }
+
+    /**
+     * Calculates the customer's credit score.
+     * CreditScore = 1 - The specified loan amount and period max out the customer's credit score
+     * CreditScore < 1 - Customer can not afford the loan in the specified period
+     * CreditScore > 1 - Customer can afford a bigger loan in the specified period
+     * @return Customer's credit score
+     */
+    private float calculateCreditScore(int loanPeriod, Long loanAmount) {
+        return (float) creditModifier / loanAmount * loanPeriod;
     }
 
     /**
@@ -97,6 +128,26 @@ public class DecisionEngine {
         return DecisionEngineConstants.SEGMENT_3_CREDIT_MODIFIER;
     }
 
+    /** Calculates customer age from their personal code
+     * True - Customer's birthdate is more than 18 years ago
+     * False - Customer's birthdate is less than 18 years ago
+     * @return Bool whether customer is underage or not
+     */
+    private boolean verifyCustomerAge(String personalCode) {
+        int ageInYears = 0;
+        try{
+            ageInYears = parser.getAge(personalCode).getYears();
+
+        } catch (Exception e){
+            return false;
+        }
+        if (ageInYears >= DecisionEngineConstants.MINIMUM_CUSTOMER_AGE) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
     /**
      * Verify that all inputs are valid according to business rules.
      * If inputs are invalid, then throws corresponding exceptions.
@@ -105,14 +156,18 @@ public class DecisionEngine {
      * @param loanAmount Requested loan amount
      * @param loanPeriod Requested loan period
      * @throws InvalidPersonalCodeException If the provided personal ID code is invalid
+     * @throws InvalidCustomerAgeException If the customer is too young
      * @throws InvalidLoanAmountException If the requested loan amount is invalid
      * @throws InvalidLoanPeriodException If the requested loan period is invalid
      */
     private void verifyInputs(String personalCode, Long loanAmount, int loanPeriod)
-            throws InvalidPersonalCodeException, InvalidLoanAmountException, InvalidLoanPeriodException {
+            throws InvalidPersonalCodeException, InvalidCustomerAgeException, InvalidLoanAmountException, InvalidLoanPeriodException {
 
         if (!validator.isValid(personalCode)) {
             throw new InvalidPersonalCodeException("Invalid personal ID code!");
+        }
+        if (!verifyCustomerAge(personalCode)) {
+            throw new InvalidCustomerAgeException("Customer is too young!");
         }
         if (!(DecisionEngineConstants.MINIMUM_LOAN_AMOUNT <= loanAmount)
                 || !(loanAmount <= DecisionEngineConstants.MAXIMUM_LOAN_AMOUNT)) {
